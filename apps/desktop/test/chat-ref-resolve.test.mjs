@@ -279,3 +279,18 @@ test("a project folder never loses to the scratch store", async () => {
   assert.equal(match?.root, "workspace");
   assert.equal(match?.projectRoot?.path, sibling);
 });
+
+test("resolves Windows absolute paths with spaces and drive letters", async () => {
+  const project = tempTree("demo project", ["readme.md"]);
+  const file = join(project, "readme.md");
+  const match = await resolve(file, { workspace: project });
+  assert.equal(match?.root, "workspace");
+  assert.equal(match?.relativePath, "readme.md");
+  assert.equal(match?.matchedBy, "exact-absolute");
+
+  const forwardSlashes = file.replaceAll("\\", "/");
+  const matchSlash = await resolve(forwardSlashes, { workspace: project });
+  assert.equal(matchSlash?.root, "workspace");
+  assert.equal(matchSlash?.relativePath, "readme.md");
+  assert.equal(matchSlash?.matchedBy, "exact-absolute");
+});

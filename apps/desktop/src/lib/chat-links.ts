@@ -38,7 +38,7 @@ const KNOWN_BARE_NAMES = new Set([
 ]);
 
 const FILE_TOKEN_RE =
-  /^(?:~\/|\/)?(?:\.{1,2}\/)?[\p{L}\p{N}_@+.-]+(?:\/[\p{L}\p{N}_@+.-]+)*(?::\d+(?::\d+)?)?$/u;
+  /^(?:~\/|\/|[a-zA-Z]:[\\/])?(?:\.{1,2}[\\/])?[^\0\r\n\\/:*?"<>]+(?:[\\/][^\0\r\n\\/:*?"<>]+)*(?::\d+(?::\d+)?)?$/u;
 
 const AT_QUOTED_RE = /^@"([^"\n]+)"$/;
 const AT_UNQUOTED_RE = /^@(\/?[^\s]+)$/;
@@ -164,18 +164,32 @@ export function toWorkspaceRel(
   if (!path) return null;
   if (path.startsWith("~")) return null;
 
+  const normalized = path.replaceAll("\\", "/");
+  const isWindowsAbsolute = /^[a-zA-Z]:\//.test(normalized);
+  const isPosixAbsolute = normalized.startsWith("/");
+
   let rel: string;
-  if (path.startsWith("/")) {
+  if (isPosixAbsolute || isWindowsAbsolute) {
     if (!root) return null;
-    const cleanRoot = root.replace(/\/+$/, "");
-    if (path === cleanRoot) return null;
-    if (!path.startsWith(cleanRoot + "/")) return null;
-    rel = path.slice(cleanRoot.length + 1);
-  } else if (isDotRelative(path)) {
+    const cleanRoot = root.replaceAll("\\", "/").replace(/\/+$/, "");
+    if (normalized === cleanRoot) return null;
+    if (
+      normalized.length <= cleanRoot.length ||
+      normalized[cleanRoot.length] !== "/"
+    ) {
+      return null;
+    }
+    const candRoot = normalized.slice(0, cleanRoot.length);
+    const matches =
+      candRoot === cleanRoot ||
+      (isWindowsAbsolute && candRoot.toLowerCase() === cleanRoot.toLowerCase());
+    if (!matches) return null;
+    rel = normalized.slice(cleanRoot.length + 1);
+  } else if (isDotRelative(normalized)) {
     const base = (baseDir ?? "").replaceAll("\\", "/").replace(/\/+$/, "");
-    rel = base ? `${base}/${path}` : path;
+    rel = base ? `${base}/${normalized}` : normalized;
   } else {
-    rel = path;
+    rel = normalized;
   }
 
   return normalizeWorkspaceRel(rel);
@@ -238,14 +252,14 @@ export type ChatTextSegment =
       target: ChatPreviewTarget;
     };
 
-// Unicode-aware scan (#235). `~`- and `/`-prefixed paths are captured whole
-// so the resolver sees the real anchor: under-root absolutes resolve, while
-// outside absolutes and home paths fail resolution and stay plain text
+// Unicode-aware scan (#235). `~`-, `/`-, and Windows drive-prefixed paths are
+// captured whole so the resolver sees the real anchor: under-root absolutes resolve,
+// while outside absolutes and home paths fail resolution and stay plain text
 // instead of chipping a suffix that could never open. The extension tail
 // uses `(?![A-Za-z0-9_])` rather than `\b`: in unicode mode `\b` treats CJK
 // letters as word characters, which would stop `App.tsx文件` from linking.
 const SCAN_RE =
-  /@"[^"\n]+"|@[^\s]+|https?:\/\/(?=[^\s<>"'()[\]{}])|(?:~\/)?\/?\.{1,2}\/(?:[\p{L}\p{N}_@+.-]+\/)*[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?:~\/)?\/?(?:[\p{L}\p{N}_@+.-]+\/)+[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|[\p{L}\p{N}_@+-][\p{L}\p{N}_@+.-]*\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9_])/gu;
+  /@"[^"\n]+"|@[^\s]+|https?:\/\/(?=[^\s<>"'()[\]{}])|[a-zA-Z]:[\\/](?:[\p{L}\p{N}_@+.-]+[\\/])*[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?:~\/)?\/?\.{1,2}\/(?:[\p{L}\p{N}_@+.-]+\/)*[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?:~\/)?\/?(?:[\p{L}\p{N}_@+.-]+\/)+[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?<![\\/])[\p{L}\p{N}_@+-][\p{L}\p{N}_@+.-]*\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9_])/gu;
 
 /** Scan once, keeping URL parentheses but stopping at a closing prose wrapper. */
 function scanUrl(text: string, start: number): string {

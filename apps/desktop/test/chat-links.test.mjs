@@ -23,6 +23,10 @@ test("parseFileRef accepts pathy tokens and strips line refs", () => {
   assert.equal(parseFileRef("docs/Makefile"), "docs/Makefile");
   assert.equal(parseFileRef("./README.md"), "./README.md");
   assert.equal(parseFileRef("../adr/0163.md"), "../adr/0163.md");
+  assert.equal(parseFileRef("C:\\demo project\\readme.md"), "C:\\demo project\\readme.md");
+  assert.equal(parseFileRef("C:/demo project/readme.md"), "C:/demo project/readme.md");
+  assert.equal(parseFileRef("/Users/me/my project/page.md"), "/Users/me/my project/page.md");
+  assert.equal(parseFileRef("docs/中文目录/page.md"), "docs/中文目录/page.md");
 });
 
 test("parseFileRef accepts bare names only with known extensions", () => {
@@ -51,6 +55,11 @@ test("toWorkspaceRel maps absolute paths under the root and rejects escapes", ()
   assert.equal(toWorkspaceRel("../outside.ts", ROOT), null);
   assert.equal(toWorkspaceRel("~/anything.ts", ROOT), null);
   assert.equal(toWorkspaceRel("apps/../docs/foo.md", ROOT), "docs/foo.md");
+  assert.equal(toWorkspaceRel("C:\\demo project\\readme.md", "C:/demo project"), "readme.md");
+  assert.equal(toWorkspaceRel("C:/demo project/readme.md", "C:/demo project"), "readme.md");
+  assert.equal(toWorkspaceRel("c:\\demo project\\readme.md", "C:/demo project"), "readme.md");
+  assert.equal(toWorkspaceRel("D:\\other\\readme.md", "C:/demo project"), null);
+  assert.equal(toWorkspaceRel("/Users/me/my project/page.md", "/Users/me/my project"), "page.md");
 });
 
 test("toWorkspaceRel resolves ./ and ../ against a markdown file directory", () => {
@@ -102,6 +111,14 @@ test("resolvePreviewTarget classifies urls and workspace files", () => {
   });
   assert.equal(resolvePreviewTarget("/outside/root.ts", ROOT), null);
   assert.equal(isHttpUrl("ftp://example.com"), false);
+  assert.deepEqual(
+    resolvePreviewTarget("C:\\demo project\\readme.md", "C:/demo project"),
+    { kind: "file", path: "readme.md" },
+  );
+  assert.deepEqual(
+    resolvePreviewTarget("C:/demo project/readme.md", "C:/demo project"),
+    { kind: "file", path: "readme.md" },
+  );
 });
 
 test("getToolPreviewTarget reads path-like args and fetch urls", () => {
@@ -139,6 +156,19 @@ test("splitChatText linkifies embedded refs and keeps literals", () => {
     kind: "url",
     url: "https://example.com",
   });
+  const winSegments = splitChatText(
+    "Check C:\\project\\src\\App.tsx now",
+    "C:/project",
+  );
+  assert.deepEqual(
+    winSegments.map((s) => s.kind),
+    ["text", "target", "text"],
+  );
+  assert.deepEqual(winSegments[1].target, {
+    kind: "file",
+    path: "src/App.tsx",
+  });
+  assert.equal(winSegments[1].label, "App.tsx");
   // text with no refs comes back as one literal run
   assert.deepEqual(splitChatText("普通文本，没有链接。", ROOT), [
     { kind: "text", text: "普通文本，没有链接。" },
