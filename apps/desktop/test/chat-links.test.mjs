@@ -169,6 +169,44 @@ test("splitChatText linkifies embedded refs and keeps literals", () => {
     path: "src/App.tsx",
   });
   assert.equal(winSegments[1].label, "App.tsx");
+
+  // Anchored paths with spaces (#1169 / vastsa review)
+  const winSpace1 = splitChatText("See C:\\demo project\\readme.md now", "C:/demo project");
+  assert.deepEqual(winSpace1, [
+    { kind: "text", text: "See " },
+    {
+      kind: "target",
+      text: "C:\\demo project\\readme.md",
+      label: "readme.md",
+      target: { kind: "file", path: "readme.md" },
+    },
+    { kind: "text", text: " now" },
+  ]);
+
+  const winSpace2 = splitChatText("See C:/demo project/readme.md now", "C:/demo project");
+  assert.deepEqual(winSpace2, [
+    { kind: "text", text: "See " },
+    {
+      kind: "target",
+      text: "C:/demo project/readme.md",
+      label: "readme.md",
+      target: { kind: "file", path: "readme.md" },
+    },
+    { kind: "text", text: " now" },
+  ]);
+
+  const posixSpace = splitChatText("Check /Users/me/my project/page.md here", "/Users/me/my project");
+  assert.deepEqual(posixSpace, [
+    { kind: "text", text: "Check " },
+    {
+      kind: "target",
+      text: "/Users/me/my project/page.md",
+      label: "page.md",
+      target: { kind: "file", path: "page.md" },
+    },
+    { kind: "text", text: " here" },
+  ]);
+
   // text with no refs comes back as one literal run
   assert.deepEqual(splitChatText("普通文本，没有链接。", ROOT), [
     { kind: "text", text: "普通文本，没有链接。" },
@@ -209,7 +247,11 @@ test("linkifyMdastTree turns bare paths into links and skips code", () => {
         type: "paragraph",
         children: [{ type: "text", value: "See apps/desktop/src/App.tsx please" }],
       },
+      // Note: inlineCode nodes are deliberately kept untouched by linkifyMdastTree
+      // because Markdown's InlineCode component handles code preview targets directly
+      // via resolvePreviewTarget (ADR 0262).
       { type: "inlineCode", value: "apps/desktop/src/App.tsx" },
+      { type: "inlineCode", value: "C:\\demo project\\readme.md" },
       {
         type: "link",
         url: "https://example.com",
@@ -221,7 +263,8 @@ test("linkifyMdastTree turns bare paths into links and skips code", () => {
   assert.equal(tree.children[0].children[1].type, "link");
   assert.equal(tree.children[0].children[1].url, "apps/desktop/src/App.tsx");
   assert.equal(tree.children[1].type, "inlineCode");
-  assert.equal(tree.children[2].children[0].type, "text");
+  assert.equal(tree.children[2].type, "inlineCode");
+  assert.equal(tree.children[3].children[0].type, "text");
 });
 
 test("linkifyMdastTree ignores a missing tree instead of reading type", () => {

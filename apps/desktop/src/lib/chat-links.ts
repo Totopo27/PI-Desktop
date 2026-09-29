@@ -61,11 +61,12 @@ function leafName(path: string): string {
 }
 
 function isLikelyFilePath(path: string): boolean {
-  const base = path.split("/").pop() ?? "";
+  const normalized = path.replaceAll("\\", "/");
+  const base = normalized.split("/").pop() ?? "";
   const dotIndex = base.lastIndexOf(".");
   const ext = dotIndex > 0 ? base.slice(dotIndex + 1).toLowerCase() : "";
-  if (path.includes("/")) {
-    if (ext && ext.length <= 8) return true;
+  if (normalized.includes("/")) {
+    if (ext && KNOWN_EXTS.has(ext)) return true;
     if (KNOWN_BARE_NAMES.has(base)) return true;
     return false;
   }
@@ -252,14 +253,55 @@ export type ChatTextSegment =
       target: ChatPreviewTarget;
     };
 
-// Unicode-aware scan (#235). `~`-, `/`-, and Windows drive-prefixed paths are
-// captured whole so the resolver sees the real anchor: under-root absolutes resolve,
-// while outside absolutes and home paths fail resolution and stay plain text
-// instead of chipping a suffix that could never open. The extension tail
-// uses `(?![A-Za-z0-9_])` rather than `\b`: in unicode mode `\b` treats CJK
-// letters as word characters, which would stop `App.tsx文件` from linking.
-const SCAN_RE =
-  /@"[^"\n]+"|@[^\s]+|https?:\/\/(?=[^\s<>"'()[\]{}])|[a-zA-Z]:[\\/](?:[\p{L}\p{N}_@+.-]+[\\/])*[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?:~\/)?\/?\.{1,2}\/(?:[\p{L}\p{N}_@+.-]+\/)*[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?:~\/)?\/?(?:[\p{L}\p{N}_@+.-]+\/)+[\p{L}\p{N}_@+.-]+(?::\d+(?::\d+)?)?|(?<![\\/])[\p{L}\p{N}_@+-][\p{L}\p{N}_@+.-]*\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9_])/gu;
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildRootPrefixPatterns(root?: string | null): string[] {
+  if (!root) return [];
+  const clean = root.replaceAll("\\", "/").replace(/\/+$/, "");
+  const patterns: string[] = [];
+  if (/^[a-zA-Z]:\//.test(clean)) {
+    const drive = clean[0];
+    const tailSlash = clean.slice(2);
+    const tailBack = tailSlash.replaceAll("/", "\\");
+    patterns.push(`[${drive.toLowerCase()}${drive.toUpperCase()}]:${escapeRegex(tailSlash)}`);
+    patterns.push(`[${drive.toLowerCase()}${drive.toUpperCase()}]:${escapeRegex(tailBack)}`);
+  } else if (clean.startsWith("/")) {
+    patterns.push(escapeRegex(clean));
+  }
+  return patterns;
+}
+
+function getScanRegex(root?: string | null): RegExp {
+  const rootPatterns = buildRootPrefixPatterns(root);
+  const rootBranch = rootPatterns.length
+    ? `(?:${rootPatterns.join("|")})[\\\\/][^\\0\\r\\n:*?"<>]+|`
+    : "";
+  return new RegExp(
+    `@"[^"\\n]+"|@[^\\s]+|https?:\\/\\/(?=[^\\s<>"'()[\\]{}])|` +
+    rootBranch +
+    `[a-zA-Z]:[\\\\/](?:[\\p{L}\\p{N}_@+.-]+[\\\\/])*[\\p{L}\\p{N}_@+.-]+(?::\d+(?::\d+)?)?|` +
+    `(?:~\\/)?\\/?\\.{1,2}\\/(?:[\\p{L}\\p{N}_@+.-]+\\/)*[\\p{L}\\p{N}_@+.-]+(?::\d+(?::\d+)?)?|` +
+    `(?:~\\/)?\\/?(?:[\\p{L}\\p{N}_@+.-]+\\/)+[\\p{L}\\p{N}_@+.-]+(?::\d+(?::\d+)?)?|` +
+    `(?<![\\\\/])[\\p{L}\\p{N}_@+-][\\p{L}\\p{N}_@+.-]*\\.[A-Za-z0-9]{1,8}(?![A-Za-z0-9_])`,
+    "gu",
+  );
+}
+
+function scanAnchoredCandidate(matchedText: string): string | null {
+  const words = matchedText.split(" ");
+  let candidate = "";
+  let best: string | null = null;
+  for (let i = 0; i < words.length; i += 1) {
+    candidate = i === 0 ? words[0] : `${candidate} ${words[i]}`;
+    const clean = candidate.replace(/[.,!?;:，。！？；：）)]+$/u, "");
+    if (isLikelyFilePath(clean)) {
+      best = clean;
+    }
+  }
+  return best;
+}
 
 /** Scan once, keeping URL parentheses but stopping at a closing prose wrapper. */
 function scanUrl(text: string, start: number): string {
@@ -291,12 +333,23 @@ export function splitChatText(
 ): ChatTextSegment[] {
   const segments: ChatTextSegment[] = [];
   let last = 0;
-  const scanner = new RegExp(SCAN_RE);
+  const scanner = getScanRegex(root);
+  const rootPatterns = buildRootPrefixPatterns(root);
+  const isRootAnchored = rootPatterns.length
+    ? new RegExp(`^(?:${rootPatterns.join("|")})[\\\\/]`, "u")
+    : null;
+
   for (let match = scanner.exec(text); match; match = scanner.exec(text)) {
     const start = match.index;
-    const raw = /^https?:\/\//i.test(match[0])
-      ? scanUrl(text, start)
-      : match[0];
+    let raw = match[0];
+    if (/^https?:\/\//i.test(raw)) {
+      raw = scanUrl(text, start);
+    } else if (isRootAnchored && isRootAnchored.test(raw)) {
+      const anchored = scanAnchoredCandidate(raw);
+      if (anchored) {
+        raw = anchored;
+      }
+    }
     scanner.lastIndex = start + raw.length;
     const target = resolvePreviewTarget(raw, root, baseDir);
     if (!target) continue;
