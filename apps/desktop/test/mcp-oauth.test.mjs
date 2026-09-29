@@ -10,6 +10,7 @@ import {
   canReuseDcrClient,
   isLoopbackHostname,
   LOOPBACK_REDIRECT_PORTLESS,
+  asMetadataCandidates,
 } from "../electron/main/mcp-oauth.ts";
 import { UserMcpRuntime } from "../electron/main/user-mcp.ts";
 import { applyUserEndpointPolicyFromAppSettings } from "../electron/main/endpoint-policy.ts";
@@ -983,4 +984,157 @@ test("McpOAuthManager: onAuthorized receives the server record", async (t) => {
   await waitUntil(() => authorized);
   assert.equal(authorized.serverId, record.id);
   assert.equal(authorized.record, record);
+});
+
+test("asMetadataCandidates orders candidate URLs per RFC 8414 §3.1 & §5", () => {
+  const withPath = new URL("https://auth.example.com/api/auth");
+  assert.deepEqual(asMetadataCandidates(withPath), [
+    "https://auth.example.com/.well-known/oauth-authorization-server/api/auth",
+    "https://auth.example.com/.well-known/openid-configuration/api/auth",
+    "https://auth.example.com/api/auth/.well-known/openid-configuration",
+  ]);
+
+  const withTrailingSlash = new URL("https://auth.example.com/tenant1/");
+  assert.deepEqual(asMetadataCandidates(withTrailingSlash), [
+    "https://auth.example.com/.well-known/oauth-authorization-server/tenant1",
+    "https://auth.example.com/.well-known/openid-configuration/tenant1",
+    "https://auth.example.com/tenant1/.well-known/openid-configuration",
+  ]);
+
+  const rootOnly = new URL("https://auth.example.com");
+  assert.deepEqual(asMetadataCandidates(rootOnly), [
+    "https://auth.example.com/.well-known/oauth-authorization-server",
+    "https://auth.example.com/.well-known/openid-configuration",
+  ]);
+});
+
+test("McpOAuthManager: discovers metadata when authorization_server contains path components (RFC 8414 / #1221)", async (t) => {
+  const host = fakeHost();
+  const requestedUrls = [];
+  const mockFetch = async (input) => {
+    const urlStr = typeof input === "string" ? input : input.url;
+    requestedUrls.push(urlStr);
+    const url = new URL(urlStr);
+
+    if (url.pathname === "/mcp") {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": 'Bearer resource_metadata="https://mcp.test/.well-known/oauth-protected-resource/mcp"',
+        },
+      });
+    }
+
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      return new Response(JSON.stringify({
+        resource: "https://mcp.test/mcp",
+        authorization_servers: ["https://auth.test/api/auth"],
+        scopes_supported: ["mcp", "read"],
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (url.pathname === "/.well-known/oauth-authorization-server/api/auth") {
+      return new Response(JSON.stringify({
+        issuer: "https://auth.test/api/auth",
+        authorization_endpoint: "https://auth.test/api/auth/authorize",
+        token_endpoint: "https://auth.test/api/auth/token",
+      }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    return new Response(null, { status: 404 });
+  };
+
+  const manager = new McpOAuthManager({
+    call: host.call,
+    fetchImpl: mockFetch,
+    openExternal: async () => {},
+  });
+  t.after(() => manager.disposeAll());
+
+  const metadata = await manager.discoverMetadata("https://mcp.test/mcp");
+  assert.equal(metadata.resource, "https://mcp.test/mcp");
+  assert.equal(metadata.authorizationEndpoint, "https://auth.test/api/auth/authorize");
+  assert.equal(metadata.tokenEndpoint, "https://auth.test/api/auth/token");
+  assert.deepEqual(metadata.scopesSupported, ["mcp", "read"]);
+  assert.ok(requestedUrls.includes("https://auth.test/.well-known/oauth-authorization-server/api/auth"));
+});
+
+test("McpOAuthManager: joins all scopes from scopes_supported with space (RFC 6749 / #1221)", async (t) => {
+  const host = fakeHost();
+  const { mockFetch } = createMockFetch();
+  const { mockCreateServer } = createMockServerFactory();
+  let openedUrl = null;
+
+  const manager = new McpOAuthManager({
+    call: host.call,
+    fetchImpl: mockFetch,
+    createServer: mockCreateServer,
+    openExternal: async (url) => {
+      openedUrl = url;
+    },
+  });
+  t.after(() => manager.disposeAll());
+
+  await manager.start("multi-scope", "https://notion.test/mcp");
+  await waitUntil(() => openedUrl);
+
+  const parsedUrl = new URL(openedUrl);
+  // scopes_supported in mock is ["read", "write"] -> must join all with space, not only first
+  assert.equal(parsedUrl.searchParams.get("scope"), "read write");
+});
+
+test("McpOAuthManager: uses scope from initial 401 WWW-Authenticate header (MCP Auth spec / #1221)", async (t) => {
+  const host = fakeHost();
+  const { mockCreateServer } = createMockServerFactory();
+  let openedUrl = null;
+
+  const mockFetch = async (input, init = {}) => {
+    const url = new URL(typeof input === "string" ? input : input.url);
+    if (url.pathname === "/mcp") {
+      return new Response(JSON.stringify({ error: "Unauthorized" }), {
+        status: 401,
+        headers: {
+          "Content-Type": "application/json",
+          "WWW-Authenticate": 'Bearer resource_metadata="https://scoped.test/.well-known/oauth-protected-resource/mcp", scope="custom_mcp_scope"',
+        },
+      });
+    }
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      return new Response(JSON.stringify({
+        resource: "https://scoped.test/mcp",
+        authorization_servers: ["https://scoped.test"],
+        scopes_supported: ["read", "write"],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return new Response(JSON.stringify({
+        authorization_endpoint: "https://scoped.test/authorize",
+        token_endpoint: "https://scoped.test/token",
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(null, { status: 404 });
+  };
+
+  const manager = new McpOAuthManager({
+    call: host.call,
+    fetchImpl: mockFetch,
+    createServer: mockCreateServer,
+    openExternal: async (url) => {
+      openedUrl = url;
+    },
+  });
+  t.after(() => manager.disposeAll());
+
+  await manager.start("probe-scope", "https://scoped.test/mcp");
+  await waitUntil(() => openedUrl);
+
+  const parsedUrl = new URL(openedUrl);
+  assert.equal(parsedUrl.searchParams.get("scope"), "custom_mcp_scope");
 });

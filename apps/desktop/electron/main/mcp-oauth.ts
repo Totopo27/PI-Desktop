@@ -28,6 +28,7 @@ export type McpOAuthMetadata = {
   tokenEndpoint: string;
   registrationEndpoint?: string;
   scopesSupported?: string[];
+  probeScope?: string;
 };
 
 export type McpOAuthDeps = {
@@ -155,6 +156,28 @@ export function preferredLoopbackPort(uris: string[] | undefined): number | unde
   return undefined;
 }
 
+/**
+ * Build RFC 8414 §3.1 & §5 Authorization Server Metadata discovery candidate URLs.
+ * When the issuer contains a path component, try:
+ * 1. /.well-known/oauth-authorization-server/<path>
+ * 2. /.well-known/openid-configuration/<path>
+ * 3. <path>/.well-known/openid-configuration
+ */
+export function asMetadataCandidates(authServerObj: URL): string[] {
+  const path = authServerObj.pathname.replace(/\/+$/, "");
+  if (!path || path === "/") {
+    return [
+      new URL("/.well-known/oauth-authorization-server", authServerObj.origin).toString(),
+      new URL("/.well-known/openid-configuration", authServerObj.origin).toString(),
+    ];
+  }
+  return [
+    new URL(`/.well-known/oauth-authorization-server${path}`, authServerObj.origin).toString(),
+    new URL(`/.well-known/openid-configuration${path}`, authServerObj.origin).toString(),
+    new URL(`${path}/.well-known/openid-configuration`, authServerObj.origin).toString(),
+  ];
+}
+
 type LoginSession = {
   loginId: string;
   serverId: string;
@@ -202,6 +225,7 @@ export class McpOAuthManager {
   async discoverMetadata(serverUrl: string): Promise<McpOAuthMetadata> {
     const urlObj = new URL(serverUrl);
     let resourceMetadataUrl: string | undefined;
+    let probeScope: string | undefined;
 
     // Step 1: Probe endpoint to check for 401 with WWW-Authenticate
     try {
@@ -231,6 +255,12 @@ export class McpOAuthManager {
             wwwAuth.match(/resource_metadata=([^,\s]+)/i);
           if (match?.[1]) {
             resourceMetadataUrl = match[1];
+          }
+          const scopeMatch =
+            wwwAuth.match(/scope="([^"]+)"/i) ??
+            wwwAuth.match(/scope=([^,\s]+)/i);
+          if (scopeMatch?.[1]) {
+            probeScope = scopeMatch[1];
           }
         }
       }
@@ -276,12 +306,9 @@ export class McpOAuthManager {
     assertTlsProtectedUrl(authServer, "authorization_server", serverUrl);
     const authServerObj = new URL(authServer);
 
-    // Step 3: Fetch Authorization Server Metadata (RFC 8414)
+    // Step 3: Fetch Authorization Server Metadata (RFC 8414 §3.1 & §5)
     let asMeta: Record<string, unknown> | null = null;
-    const asMetaCandidates = [
-      new URL("/.well-known/oauth-authorization-server", authServerObj.origin).toString(),
-      new URL("/.well-known/openid-configuration", authServerObj.origin).toString(),
-    ];
+    const asMetaCandidates = asMetadataCandidates(authServerObj);
 
     for (const asUrl of asMetaCandidates) {
       try {
@@ -312,10 +339,10 @@ export class McpOAuthManager {
     if (registrationEndpoint) {
       assertTlsProtectedUrl(registrationEndpoint, "registration_endpoint", serverUrl);
     }
-    const scopesSupported = Array.isArray(asMeta?.scopes_supported)
-      ? (asMeta.scopes_supported as string[])
-      : Array.isArray(prm?.scopes_supported)
-        ? (prm.scopes_supported as string[])
+    const scopesSupported = Array.isArray(prm?.scopes_supported)
+      ? (prm.scopes_supported as string[])
+      : Array.isArray(asMeta?.scopes_supported)
+        ? (asMeta.scopes_supported as string[])
         : undefined;
 
     return {
@@ -325,6 +352,7 @@ export class McpOAuthManager {
       tokenEndpoint,
       registrationEndpoint,
       scopesSupported,
+      ...(probeScope ? { probeScope } : {}),
     };
   }
 
@@ -697,12 +725,16 @@ export class McpOAuthManager {
             authUrl.searchParams.set("code_challenge_method", "S256");
             authUrl.searchParams.set("resource", metadata.resource);
 
-            // MVP: no per-server scope picker. Prefer a literal "default" if
-            // advertised (Notion-class), otherwise the first supported scope.
-            if (metadata.scopesSupported?.includes("default")) {
+            // Scope selection strategy (MCP Authorization Spec & RFC 6749):
+            // 1. Scope from initial WWW-Authenticate challenge.
+            // 2. Otherwise prefer literal "default" if advertised (Notion-class).
+            // 3. Otherwise all scopes from scopesSupported joined by space.
+            if (metadata.probeScope) {
+              authUrl.searchParams.set("scope", metadata.probeScope);
+            } else if (metadata.scopesSupported?.includes("default")) {
               authUrl.searchParams.set("scope", "default");
-            } else if (metadata.scopesSupported?.[0]) {
-              authUrl.searchParams.set("scope", metadata.scopesSupported[0]);
+            } else if (metadata.scopesSupported && metadata.scopesSupported.length > 0) {
+              authUrl.searchParams.set("scope", metadata.scopesSupported.join(" "));
             }
 
             this.deps.log?.("info", "opening browser for mcp oauth", {
