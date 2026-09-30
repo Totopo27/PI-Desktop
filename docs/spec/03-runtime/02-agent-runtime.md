@@ -1617,11 +1617,13 @@ format, repair-needing newline, unavailable provider/auth, active lease, or
 external byte change makes continuation fail closed while detail remains
 browseable.
 
-### Provider certificate trust (issue #714)
+### Provider certificate trust (issue #714, #1187)
 
-The desktop sidecar starts with Node's `--use-system-ca`, retaining bundled
-roots and inherited `NODE_EXTRA_CA_CERTS`. It uses the OS trust store without
-turning off chain or hostname validation. Restart after updating local trust
+On Windows, the desktop sidecar starts with Node's `--use-system-ca`, retaining bundled
+roots and inherited `NODE_EXTRA_CA_CERTS`. On macOS and Linux, the sidecar relies on
+bundled roots and inherited `NODE_EXTRA_CA_CERTS`, omitting `--use-system-ca` to avoid
+BoringSSL certificate chain resolution failures (issue #1187). It uses the OS trust store
+without turning off chain or hostname validation. Restart after updating local trust
 or the extra-CA startup environment. Headless pi-host launch behavior and
 System/Direct/Custom proxy routing are unchanged.
 

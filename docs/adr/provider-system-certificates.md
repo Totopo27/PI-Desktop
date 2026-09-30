@@ -18,16 +18,24 @@ system roots in the default CA set. The older Node 22.16.0 behavior reported in
 
 ## Decision
 
-The desktop launcher passes `--use-system-ca` before the sidecar entry point.
-Node combines its bundled roots with system roots and inherited
-`NODE_EXTRA_CA_CERTS`. Certificate chain, expiration and hostname validation
-remain enabled. The app neither installs roots nor exports a certificate bundle.
-The operating system's existing trust policy is the authority for local roots.
+The desktop launcher passes `--use-system-ca` before the sidecar entry point on
+Windows (`win32`). On macOS and Linux, `--use-system-ca` is omitted (see
+Amendment below). Node combines its bundled roots with system roots on Windows
+and inherited `NODE_EXTRA_CA_CERTS`. Certificate chain, expiration and hostname
+validation remain enabled. The app neither installs roots nor exports a
+certificate bundle. The operating system's existing trust policy is the authority
+for local roots.
 
 This applies to the desktop sidecar's default Node TLS clients, including the
 direct, HTTP proxy and SOCKS provider transports. It is a process-level default,
 not a per-provider exception. Headless pi-host launch policy is unchanged.
 Restart the desktop after changing roots or its extra-CA startup environment.
+
+## Amendment (2026-09-29) — platform scoping for `--use-system-ca` (#1187)
+
+- On macOS, passing `--use-system-ca` under Electron's BoringSSL crypto implementation causes certificate chain verification failures (`UNABLE_TO_GET_ISSUER_CERT`) on public CA chains (such as `GlobalSign RSA OV SSL CA 2018` used by Alibaba Cloud Model Studio, Baidu, and others).
+- The `--use-system-ca` launcher argument is scoped to Windows (`process.platform === "win32"`), where Electron CryptoAPI integration successfully loads system roots without side effects.
+- On non-Windows platforms (macOS, Linux), the sidecar uses Node's bundled Mozilla CA roots, while `NODE_EXTRA_CA_CERTS` remains available for enterprise inspection roots.
 
 Explicit certificate verification codes make `NETWORK_ERROR` non-retriable
 and exclude it from transport rebuilding. The same classification is used
