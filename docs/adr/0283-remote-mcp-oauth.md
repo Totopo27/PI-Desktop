@@ -55,3 +55,7 @@ Previous MCP implementations in PI-Desktop supported only static HTTP headers. U
 
 - Preserve issuer paths when discovering authorization metadata: try OAuth path insertion, OIDC path insertion, then OIDC path appending. Root issuers retain the two root discovery URLs. Keep the existing TLS checks and manual redirect policy.
 - Request scopes from the initial 401 Bearer challenge first, otherwise all valid `scopes_supported` entries from protected-resource metadata. Omit `scope` when neither supplies one; authorization-server scope catalogs do not describe the resource's requirements and must not supply defaults or extra scopes.
+
+## Amendment (2026-10-20) — fail explicitly on missing registration endpoint (#1782)
+
+- When an authorization server omits RFC 7591 Dynamic Client Registration (`registration_endpoint`) and no registered OAuth client credentials exist for the server, reject the authorization attempt with an actionable error. Do not open an external browser with a hardcoded, fabricated `client_id` (e.g. `pi-desktop`) that results in 404/400 errors at the provider.

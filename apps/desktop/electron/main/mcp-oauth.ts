@@ -677,7 +677,9 @@ export class McpOAuthManager {
               clientSecret = registered.clientSecret;
               redirectUrisToStore = registered.redirectUris;
             } else {
-              clientId = "pi-desktop";
+              throw new Error(
+                `MCP server does not support Dynamic Client Registration (registration_endpoint missing from OAuth authorization server metadata). To authenticate, configure an OAuth client_id for this server.`,
+              );
             }
 
             const authUrl = new URL(metadata.authorizationEndpoint);

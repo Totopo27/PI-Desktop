@@ -550,6 +550,56 @@ test("McpOAuthManager: cancel stops loopback server and emits cancelled event", 
   assert.ok(cancelEvent);
 });
 
+test("McpOAuthManager: fails with descriptive error when server has no DCR and no client_id configured", async (t) => {
+  const host = fakeHost();
+  const mockFetch = async (input) => {
+    const url = new URL(typeof input === "string" ? input : input.url);
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      return new Response(JSON.stringify({
+        resource: "https://copilot.test/mcp",
+        authorization_servers: ["https://copilot.test"],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (url.pathname === "/.well-known/oauth-authorization-server") {
+      return new Response(JSON.stringify({
+        issuer: "https://copilot.test",
+        authorization_endpoint: "https://copilot.test/authorize",
+        token_endpoint: "https://copilot.test/token",
+        // Notice: NO registration_endpoint here (like GitHub Copilot MCP)
+        code_challenge_methods_supported: ["S256"],
+        response_types_supported: ["code"],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    return new Response(null, { status: 404 });
+  };
+
+  const { mockCreateServer } = createMockServerFactory();
+  const events = [];
+  let openedUrl = null;
+
+  const manager = new McpOAuthManager({
+    call: host.call,
+    fetchImpl: mockFetch,
+    createServer: mockCreateServer,
+    emit: (event) => events.push(event),
+    openExternal: async (url) => {
+      openedUrl = url;
+    },
+  });
+  t.after(() => manager.disposeAll());
+
+  const result = await manager.start("copilot", "https://copilot.test/mcp");
+  assert.equal(result.ok, true);
+
+  // Wait for error event
+  await waitUntil(() => events.some((e) => e.kind === "error" || e.kind === "authUrl"));
+
+  assert.equal(openedUrl, null, "Should not open browser with dummy client_id when DCR is missing");
+  const errEvent = events.find((e) => e.kind === "error");
+  assert.ok(errEvent, "Should emit error event");
+  assert.match(errEvent.message, /dynamic client registration|client_id/i);
+});
+
 test("UserMcpRuntime: rebuilds live client when OAuth token is updated", async (t) => {
   const host = fakeHost();
   const manager = new McpOAuthManager({ call: host.call, openExternal: async () => {} });
