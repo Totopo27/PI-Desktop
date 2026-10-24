@@ -660,4 +660,104 @@ mod tests {
             BackgroundTaskState::Stopped
         );
     }
+
+    /// On Windows, stopping a background task must terminate any child processes
+    /// spawned by the shell runner, not only the top-level shell.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stop_terminates_descendant_processes_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child_pid.txt");
+        let pid_file_str = pid_file.to_str().unwrap().replace('\\', "/");
+        // Spawn a child process (cmd.exe running ping / timeout) that writes its PID to a file.
+        let command = format!(
+            "$f = '{pid_file_str}'; $p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 60' -PassThru; [System.IO.File]::WriteAllText($f, $p.Id); Start-Sleep -Seconds 60"
+        );
+
+        let state = tokio::sync::Mutex::new(crate::state::AppState::open(dir.path()).unwrap());
+        let id = spawn_background_task_detached(
+            &state,
+            "session-1",
+            &command,
+            crate::tools::shell::default_shell_id(),
+            dir.path(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Wait for child PID to be recorded
+        let mut child_pid = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            if let Ok(content) = std::fs::read_to_string(&pid_file) {
+                let trimmed = content.trim();
+                if let Ok(pid) = trimmed.parse::<u32>() {
+                    child_pid = Some(pid);
+                    break;
+                }
+            }
+        }
+        let child_pid = child_pid.expect("descendant powershell process must write its PID");
+
+        // Verify descendant process is alive
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, child_pid) };
+        assert!(
+            !handle.is_null(),
+            "child process should be running before stop"
+        );
+        let mut exit_code = 0u32;
+        unsafe {
+            GetExitCodeProcess(handle, &mut exit_code);
+            CloseHandle(handle);
+        }
+        assert_eq!(exit_code, STILL_ACTIVE as u32);
+
+        // Now stop the task
+        {
+            let st = state.lock().await;
+            assert!(stop_task(&st.background_tasks, &id).await.unwrap());
+        }
+
+        // Wait for task to settle to Stopped
+        let mut settled = false;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let st = state.lock().await;
+            if st.background_tasks.running_count() == 0 {
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "background task settled");
+
+        // The descendant process must be dead
+        let mut child_alive = true;
+        for _ in 0..60 {
+            let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, child_pid) };
+            if handle.is_null() {
+                child_alive = false;
+                break;
+            }
+            let mut exit_code = 0u32;
+            let queried = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+            unsafe {
+                CloseHandle(handle);
+            }
+            if queried == 0 || exit_code != STILL_ACTIVE as u32 {
+                child_alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+
+        assert!(
+            !child_alive,
+            "descendant process {child_pid} must be terminated when background task stops"
+        );
+    }
 }
