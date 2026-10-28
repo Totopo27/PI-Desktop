@@ -9,6 +9,7 @@ import { TranscriptSearchContext } from "../../../lib/transcript-search-context"
 import {
   isTurnThinking,
   processContainsMessage,
+  turnHasInFlightWork,
   turnProcessPhase,
   turnProcessTiming,
 } from "../../../lib/turn-process";
@@ -84,13 +85,18 @@ export function TurnProcess({
   const summary = useMemo(() => cachedActivitySummary(
     processParts.flatMap((part) => part.kind === "activity" ? part.items : []), delegationStatuses,
   ), [processParts, delegationStatuses]);
-  const thinkingNow = useMemo(() => isTurnThinking(turnParts, isActive), [turnParts, isActive]);
+  const inFlight = useMemo(
+    () => turnHasInFlightWork(turnParts, delegationStatuses),
+    [turnParts, delegationStatuses],
+  );
+  const live = isActive || inFlight;
+  const thinkingNow = useMemo(() => isTurnThinking(turnParts, live), [turnParts, live]);
   // Active processes start open and untouched completed ones close by default;
   // an explicit user choice stays authoritative. This does not depend on the
   // thinking preference, and a recorded failure keeps an untouched active
   // process open through recovery because it stays active until the turn ends.
   const disclosure = useAutomaticDisclosure(
-    isActive,
+    live,
     revealRequest,
     disclosureKey("turn", turnId),
   );
@@ -98,11 +104,11 @@ export function TurnProcess({
   const [now, setNow] = useState(Date.now);
   const { startedAt, endedAt } = useMemo(() => turnProcessTiming(turnParts), [turnParts]);
   useEffect(() => {
-    if (!isActive) return;
+    if (!live) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(timer);
-  }, [isActive]);
+  }, [live]);
   const scope = useMemo<DisclosureScopeValue>(
     () => ({ claim: disclosure.claim, reveal: disclosure.reveal, visible: disclosure.open }),
     [disclosure.claim, disclosure.open, disclosure.reveal],
@@ -112,7 +118,7 @@ export function TurnProcess({
   // case: the reader gets the answer, and the process does not exist.
   if (visibleSteps === 0) return <>{children}</>;
   const seconds = startedAt === undefined ? 0 : Math.max(
-    0, Math.floor(((isActive ? now : (endedAt ?? startedAt)) - startedAt) / 1000),
+    0, Math.floor(((live ? now : (endedAt ?? startedAt)) - startedAt) / 1000),
   );
   const elapsed = formatToolDuration(seconds);
   // The header states the turn's outcome and its bounded metadata: status,
@@ -121,7 +127,7 @@ export function TurnProcess({
   // `startedAt` is absent for history that recorded no timing, and "0s" would be
   // a lie there, so the duration is dropped instead.
   const hasTiming = startedAt !== undefined && seconds > 0;
-  const phase = turnProcessPhase({ parts: turnParts, isActive, failed, activity });
+  const phase = turnProcessPhase({ parts: turnParts, isActive: live, failed, activity, delegationStatuses });
   // The header's label is the status alone. Duration and tool count are separate
   // values so each can be omitted independently, and the caret can follow the
   // last one instead of being pushed to the far edge of the band.
@@ -140,7 +146,7 @@ export function TurnProcess({
   // included, so the header must not add them again.
   const toolCount = summary.tools;
   return (
-    <section className={`turn-process${disclosure.open ? " open" : ""}${isActive ? " active" : ""}`}>
+    <section className={`turn-process${disclosure.open ? " open" : ""}${live ? " active" : ""}`}>
       <button
         type="button"
         ref={disclosure.titleRef}
@@ -152,10 +158,10 @@ export function TurnProcess({
         <span className="tool-activity-icon" aria-hidden>
           {phase.kind === "failed" ? <IconCircleAlert size={14} /> : <IconSparkles size={14} />}
         </span>
-        <span className={`tool-activity-label${isActive ? " running" : ""}`}>
+        <span className={`tool-activity-label${live ? " running" : ""}`}>
           {label}
         </span>
-        {isActive ? <span className="activity-marker" aria-hidden /> : null}
+        {live ? <span className="activity-marker" aria-hidden /> : null}
         {hasTiming ? (
           <>
             <span className="turn-sep" aria-hidden>·</span>

@@ -2,6 +2,7 @@ import { SubagentStopButton } from "./SubagentStopButton";
 import { activityGroupStartsOpen } from "../../../lib/activity-group-folding";
 import { activityTimingInputs, cachedVisibleActivityItems } from "../../../lib/transcript-activity-summary";
 import { reuseReferences } from "../../../lib/transcript-summary";
+import { isActivityItemInFlight } from "../../../lib/turn-process";
 import { ActivityItems } from "./ActivityItems";
 import { DisclosureScope, disclosureKey } from "./disclosure";
 import { ProcessActivityGroup } from "./ProcessActivityGroup";
@@ -238,7 +239,11 @@ export const ActivityGroup = memo(function ActivityGroup({
   // Parent tools after a Task fan-out live in a later activity part (D319), so
   // this card is not the turn's live tail while its delegates are still running.
   const topologyLive = hasSubagentTopology && subagentSummary.running > 0;
-  const live = isActive || topologyLive;
+  const inFlight = useMemo(
+    () => items.some((item) => isActivityItemInFlight(item, delegationStatuses)),
+    [items, delegationStatuses],
+  );
+  const live = isActive || topologyLive || inFlight;
   const searchTarget = useContext(TranscriptSearchContext);
   const revealRequest = useMemo(() => searchTarget && items.some((item) => item.message.id === searchTarget.messageId)
     ? searchTarget.requestId : undefined, [items, searchTarget]);

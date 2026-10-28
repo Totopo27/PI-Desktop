@@ -7,6 +7,11 @@ import type {
 import { isStandaloneRunActivity } from "./assistant-turns";
 import type { TranscriptDisplayMode } from "./transcript-display-mode";
 import { isDelegationStartTool } from "./tool-display";
+import {
+  isDelegationActivityItem,
+  subagentOutcome,
+  type SubagentOutcome,
+} from "./subagent-topology";
 
 export function isThinkingActive(message: UiMessage, active: boolean): boolean {
   return active && message.status === "streaming" && !message.content.trim();
@@ -211,11 +216,63 @@ export type TurnProcessPhase =
   | { kind: "running"; phase?: AgentActivity["phase"] }
   | { kind: "completed" };
 
+/** Whether a single activity item represents work still executing or streaming. */
+export function isActivityItemInFlight(
+  item: AssistantActivityItem,
+  delegationStatuses?: ReadonlyMap<string, SubagentOutcome>,
+): boolean {
+  if (item.message.status === "streaming" || item.message.toolStatus === "running") {
+    return true;
+  }
+  if (item.kind === "hostedSearch") {
+    return (
+      item.round.status === "searching" ||
+      item.message.hostedSearch?.status === "searching"
+    );
+  }
+  if (item.kind === "tool") {
+    if (
+      item.delegate?.items.some(
+        (row) =>
+          row.message.status === "streaming" ||
+          row.message.toolStatus === "running",
+      )
+    ) {
+      return true;
+    }
+    if (isDelegationActivityItem(item)) {
+      if (subagentOutcome(item.message, delegationStatuses) === "running") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/** Whether any part of an assistant turn represents work still executing or streaming. */
+export function turnHasInFlightWork(
+  parts: readonly AssistantTurnPart[],
+  delegationStatuses?: ReadonlyMap<string, SubagentOutcome>,
+): boolean {
+  return parts.some((part) => {
+    if (part.kind === "message") {
+      return (
+        part.message.status === "streaming" ||
+        part.message.toolStatus === "running"
+      );
+    }
+    return part.items.some((item) =>
+      isActivityItemInFlight(item, delegationStatuses),
+    );
+  });
+}
+
 export function turnProcessPhase({
   parts,
   isActive,
   failed,
   activity,
+  delegationStatuses,
 }: {
   parts: readonly AssistantTurnPart[];
   isActive: boolean;
@@ -223,6 +280,7 @@ export function turnProcessPhase({
   failed: boolean;
   /** Runtime phase while the turn is live, when the runtime reports one. */
   activity?: AgentActivity;
+  delegationStatuses?: ReadonlyMap<string, SubagentOutcome>;
 }): TurnProcessPhase {
   if (failed) return { kind: "failed" };
   // The turn result cannot say "stopped": the runtime records only completed or
@@ -237,7 +295,8 @@ export function turnProcessPhase({
       : part.items.some((item) => item.message.status === "aborted"),
   );
   if (stopped) return { kind: "stopped" };
-  if (isActive) return { kind: "running", phase: activity?.phase };
+  const live = isActive || turnHasInFlightWork(parts, delegationStatuses);
+  if (live) return { kind: "running", phase: activity?.phase };
   return { kind: "completed" };
 }
 

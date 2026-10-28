@@ -10,6 +10,8 @@ const {
   segmentTurnProcess,
   turnProcessTiming,
   turnProcessPhase,
+  turnHasInFlightWork,
+  isActivityItemInFlight,
 } = await import("../src/lib/turn-process.ts");
 const { cachedActivitySummary, cachedVisibleProcessSteps } = await import(
   "../src/lib/transcript-activity-summary.ts"
@@ -501,6 +503,107 @@ test("a failed child never turns a completed turn into failed or stopped", () =>
   assert.deepEqual(
     turnProcessPhase({ parts: [ownAborted], isActive: false, failed: false }),
     { kind: "stopped" },
+  );
+});
+
+test("in-flight tools and streaming messages keep the turn process running even when isActive is false (#1949)", () => {
+  const runningTool = {
+    kind: "activity",
+    items: [{
+      kind: "tool",
+      message: message("tool-1", "tool", "", {
+        toolName: "Bash",
+        toolStatus: "running",
+      }),
+    }],
+  };
+  assert.equal(turnHasInFlightWork([runningTool]), true);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [runningTool], isActive: false, failed: false }),
+    { kind: "running", phase: undefined },
+  );
+
+  const streamingMessage = {
+    kind: "message",
+    message: message("streaming-1", "assistant", "partial text", {
+      status: "streaming",
+    }),
+  };
+  assert.equal(turnHasInFlightWork([streamingMessage]), true);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [streamingMessage], isActive: false, failed: false }),
+    { kind: "running", phase: undefined },
+  );
+
+  const runningSearch = {
+    kind: "activity",
+    items: [{
+      kind: "hostedSearch",
+      message: message("search-1", "assistant", ""),
+      round: { id: "round-1", status: "searching", queries: ["query"] },
+    }],
+  };
+  assert.equal(turnHasInFlightWork([runningSearch]), true);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [runningSearch], isActive: false, failed: false }),
+    { kind: "running", phase: undefined },
+  );
+
+  const runningDelegate = {
+    kind: "activity",
+    items: [{
+      kind: "tool",
+      message: message("task-1", "tool", "", {
+        toolName: "Task",
+        toolStatus: "success",
+      }),
+      delegate: {
+        items: [{
+          kind: "tool",
+          message: message("subtool", "tool", "", { toolStatus: "running" }),
+        }],
+      },
+    }],
+  };
+  assert.equal(turnHasInFlightWork([runningDelegate]), true);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [runningDelegate], isActive: false, failed: false }),
+    { kind: "running", phase: undefined },
+  );
+
+  const runningTaskOutcome = {
+    kind: "activity",
+    items: [{
+      kind: "tool",
+      message: message("task-2", "tool", "", {
+        toolName: "Task",
+        toolStatus: "success",
+        toolResult: { delegationId: "del-1" },
+      }),
+    }],
+  };
+  const delegationStatuses = new Map([["del-1", "running"]]);
+  assert.equal(turnHasInFlightWork([runningTaskOutcome], delegationStatuses), true);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [runningTaskOutcome], isActive: false, failed: false, delegationStatuses }),
+    { kind: "running", phase: undefined },
+  );
+
+  // Settled work with isActive false reports completed.
+  const settledTool = {
+    kind: "activity",
+    items: [{
+      kind: "tool",
+      message: message("tool-2", "tool", "", {
+        toolName: "Bash",
+        toolStatus: "success",
+      }),
+    }],
+  };
+  assert.equal(turnHasInFlightWork([settledTool]), false);
+  assert.deepEqual(
+    turnProcessPhase({ parts: [settledTool], isActive: false, failed: false }),
+    { kind: "completed" },
   );
 });
 

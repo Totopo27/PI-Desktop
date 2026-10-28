@@ -106,6 +106,26 @@ test("the top-level header keeps only status, duration, tool count and an inline
       failedHtml,
       /issue|问题|turn-process-error|activityFailures/i,
     );
+
+    // In-flight work keeps the header visibly running and open even when
+    // isActive is false (#1949).
+    const runningTools = [
+      tool("tool-done", 0, { toolStatus: "success" }),
+      tool("tool-running", 1, { toolStatus: "running" }),
+    ];
+    const runningProcessParts = [{ kind: "activity", items: runningTools }];
+    const runningHtml = render({
+      turnId: "running-turn",
+      processParts: runningProcessParts,
+      turnParts: runningProcessParts,
+      visibleSteps: 2,
+      isActive: false,
+      failed: false,
+    });
+    assert.match(runningHtml, /class="tool-activity-label running">Running</);
+    assert.match(runningHtml, /class="activity-marker"/);
+    assert.match(runningHtml, /aria-expanded="true"/);
+    assert.match(runningHtml, /class="turn-process open active"/);
   } finally {
     await server.close();
   }

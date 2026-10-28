@@ -21,6 +21,7 @@ import {
 } from "../../../lib/subagent-topology";
 import {
   segmentTurnProcess,
+  turnHasInFlightWork,
   type TurnProcessRunSegment,
 } from "../../../lib/turn-process";
 import { sessionAllows } from "../../../lib/remote-session-safety";
@@ -282,49 +283,6 @@ export const AssistantTurn = memo(function AssistantTurn({
   const summary = getAssistantTurnSummary(entry);
   const { actionMessage, metaMessage, latestUsageMessage, usage, responseDurationMs, responseOutputTokens } = summary;
   const modelId = metaMessage?.modelId ?? latestUsageMessage?.modelId;
-  const complete = !isActive && !summary.hasError && summary.hasContent && Boolean(actionMessage);
-  // A live reply is joined only on menu/copy demand. Finished reply plugins
-  // still receive exactly the text that the completed turn's Copy action uses.
-  const content = useMemo(
-    () => complete ? getAssistantTurnContent(entry) : "",
-    [complete, entry],
-  );
-  const slotReply = useMemo(() => complete && actionMessage
-    ? slotMessage("assistant", { ...actionMessage, content }) : undefined,
-  [complete, actionMessage, content]);
-  const streaming = isActive && summary.streaming;
-  // The same preference the nested levels read: hidden reasoning is not a
-  // visible step of the turn's process.
-  const showThinking = useAppStore((state) => resolveShowThinking(state.settings));
-  const hideThinking = !showThinking;
-  /*
-    The turn owns the menu for its whole subtree, the answer rows it renders
-    included: Regenerate and Branch act on the turn's answer message, so a menu
-    owned by a single message part could not offer them honestly.
-  */
-  const onContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
-    openTranscriptMenu(event, {
-      label: t("chat.messageMenu"),
-      items: assistantTurnMenuItems({
-        t,
-        answer: complete ? content : getAssistantTurnContent(entry),
-        selectTarget:
-          [
-            ...event.currentTarget.querySelectorAll<HTMLElement>(
-              ".message-bubble",
-            ),
-          ].at(-1) ?? null,
-        complete: complete && Boolean(actionMessage) && canEditMessages,
-        actions: { copyText, selectText },
-        onRegenerate: () => {
-          if (actionMessage) void retryAssistantMessage(actionMessage.id);
-        },
-        onBranch: () => {
-          if (actionMessage) void forkAssistantMessage(actionMessage.id);
-        },
-      }),
-    });
-  };
 
   // Collect delegation statuses across ALL activity parts of this turn so that
   // a TaskWait in one part can inform the Task cards in a different part.
@@ -359,6 +317,55 @@ export const AssistantTurn = memo(function AssistantTurn({
   );
   statusesRef.current = turnDelegationStatuses;
   timingsRef.current = turnDelegationTimings;
+
+  const inFlight = useMemo(
+    () => turnHasInFlightWork(entry.parts, turnDelegationStatuses),
+    [entry.parts, turnDelegationStatuses],
+  );
+  const turnLive = isActive || inFlight;
+  const complete = !turnLive && !summary.hasError && summary.hasContent && Boolean(actionMessage);
+  // A live reply is joined only on menu/copy demand. Finished reply plugins
+  // still receive exactly the text that the completed turn's Copy action uses.
+  const content = useMemo(
+    () => complete ? getAssistantTurnContent(entry) : "",
+    [complete, entry],
+  );
+  const slotReply = useMemo(() => complete && actionMessage
+    ? slotMessage("assistant", { ...actionMessage, content }) : undefined,
+  [complete, actionMessage, content]);
+  const streaming = turnLive && summary.streaming;
+  // The same preference the nested levels read: hidden reasoning is not a
+  // visible step of the turn's process.
+  const showThinking = useAppStore((state) => resolveShowThinking(state.settings));
+  const hideThinking = !showThinking;
+  /*
+    The turn owns the menu for its whole subtree, the answer rows it renders
+    included: Regenerate and Branch act on the turn's answer message, so a menu
+    owned by a single message part could not offer them honestly.
+  */
+  const onContextMenu = (event: ReactMouseEvent<HTMLDivElement>) => {
+    openTranscriptMenu(event, {
+      label: t("chat.messageMenu"),
+      items: assistantTurnMenuItems({
+        t,
+        answer: complete ? content : getAssistantTurnContent(entry),
+        selectTarget:
+          [
+            ...event.currentTarget.querySelectorAll<HTMLElement>(
+              ".message-bubble",
+            ),
+          ].at(-1) ?? null,
+        complete: complete && Boolean(actionMessage) && canEditMessages,
+        actions: { copyText, selectText },
+        onRegenerate: () => {
+          if (actionMessage) void retryAssistantMessage(actionMessage.id);
+        },
+        onBranch: () => {
+          if (actionMessage) void forkAssistantMessage(actionMessage.id);
+        },
+      }),
+    });
+  };
   const { process, responses } = summary;
   // Read at render time, never at entry-build time: the projection cache is keyed
   // by messages and compactions only, so a grouping decision made there would
@@ -375,15 +382,15 @@ export const AssistantTurn = memo(function AssistantTurn({
   // Content facts come from the per-message cache, so a streaming delta reads
   // only its own message body rather than every earlier one.
   const visibleSteps = useMemo(
-    () => cachedVisibleProcessSteps(process, hideThinking, isActive),
-    [process, hideThinking, isActive],
+    () => cachedVisibleProcessSteps(process, hideThinking, turnLive),
+    [process, hideThinking, turnLive],
   );
   // The live tail is the turn's actual last part. A process chunk opens and
   // reports live state only while it owns that part, so a superseded thinking
   // chunk cannot keep a false "Thinking" header once a Bash call or a separate
   // streamed answer takes over the turn.
-  const activePart = isActive ? entry.parts.at(-1) : undefined;
-  const partContext = { isActive, activePart, runtimeActivity, turnDelegationStatuses, turnDelegationTimings };
+  const activePart = turnLive ? entry.parts.at(-1) : undefined;
+  const partContext = { isActive: turnLive, activePart, runtimeActivity, turnDelegationStatuses, turnDelegationTimings };
 
   return (
     <div
@@ -401,7 +408,7 @@ export const AssistantTurn = memo(function AssistantTurn({
             processParts={process}
             turnParts={entry.parts}
             visibleSteps={visibleSteps}
-            isActive={isActive}
+            isActive={turnLive}
             delegationStatuses={turnDelegationStatuses}
             failed={summary.hasError}
             activity={runtimeActivity}
